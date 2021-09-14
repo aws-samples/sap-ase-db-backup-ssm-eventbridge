@@ -1,0 +1,427 @@
+---
+AWSTemplateFormatVersion: "2010-09-09"
+
+Resources:
+  SAPASEBACKUP:
+    Type: AWS::SSM::Document
+    Properties:
+      Name: "SAP-ASE-Backup-SSM-Document"
+      DocumentType: "Command" # optional
+      Content:
+        schemaVersion: "2.2"
+        description: "SAP ASE Backup"
+        parameters:
+          snstopicarn:
+            type: String
+            description: "SNS Topic ARN to send messages"
+          backuptype:
+            type: String
+            description: "(Required) Choose the backup type to be performed (FULL, CUM or LOG)."
+            default: FULL
+          sid:
+            type: String
+            description: "(Required) Provide the SAP System ID"
+          s3bucket:
+            type: String
+            description: "(Required) Provide the S3 Bucket where Backups will be stored."
+          backupdir:
+            type: String
+            description: "(Required) Provide the database backup directory. (The same directory it was configured at SAP database ASE dump)."
+          backuplogdir:
+            type: String
+            description: "(Required) Provide the database log backup directory. (The same directory it was configured at SAP database ASE dump)"
+        mainSteps:
+          - action: "aws:runShellScript"
+            name: runShellScript
+            inputs:
+              runCommand:
+                - "#!/bin/sh -x"
+                - "#Description:"
+                - "# This script takes the backup of SAP ASE databases:"
+                - "# SAP Application database (where the SAP owner and SAP tables reside), the saptools database, and the ASE databases master, systemprocs and sybmgmtdb."
+                - "# Variables to adjust:"
+                - "TYPE={{backuptype}}"
+                - "SNSTopicArn={{snstopicarn}}"
+                - "SID={{sid}}"
+                - "S3Bucket={{s3bucket}}"
+                - "LOGFILE_LOG=/home/${SID,,}adm/log_backup.log"
+                - "LOGFILE_DATA=/home/${SID,,}adm/data_backup.log"
+                - "USERKEY=asekey"
+                - "BackupDir={{backupdir}}"
+                - "BackupLogDir={{backuplogdir}}"
+                - "# Variables NOT to adjust:"
+                - "TODAY=$(date +%F)"
+                - 'dt="$(date +"%Y-%m-%d-%H:%M:%S")"'
+                - "TrackingFileDB=/tmp/.asedatabackup.0"
+                - "TrackingFileDB2=/tmp/.bkpdataexecoutput.0"
+                - "TrackingFilemaster=/tmp/.asedatabackupmaster.0"
+                - "TrackingFilemaster2=/tmp/.bkpdataexecoutputmaster.0"
+                - "TrackingFilesaptools=/tmp/.asedatabackupsaptools.0"
+                - "TrackingFilesaptools2=/tmp/.bkpdataexecoutputsaptools2.0"
+                - "TrackingFilesybsystemprocs=/tmp/.asedatabackupsybsystemprocs.0"
+                - "TrackingFilesybsystemprocs2=/tmp/.bkpdataexecoutputsybsystemprocs2.0"
+                - "TrackingFilesybmgmtdb=/tmp/.asedatabackupsybmgmtdb.0"
+                - "TrackingFilesybmgmtdb2=/tmp/.bkpdataexecoutputsybmgmtdb2.0"
+                - "TrackingLogFile=/tmp/.asebackuplog.0"
+                - "TrackingLogFile2=/tmp/.bkplogexecoutput.0"
+                - "#Function for Full Backup of SAP DB"
+                - "full_backup() {"
+                - 'echo "Starting the full data backup of ${SID} database"'
+                - 'echo "$(date +"%Y-%m-%d-%H:%M:%S") Starting the full data backup of ${SID} database" >>  $LOGFILE_DATA'
+                - 'su - ${SID,,}adm -c "isql -k${USERKEY} -X << EOF'
+                - 'dump database ${SID} using config = "${SID}DB"'
+                - 'go > "${TrackingFileDB2}" EOF"'
+                - "RC_BKP_DB=$?"
+                - "tail -1 ${TrackingFileDB2} > ${TrackingFileDB}"
+                - 'if [ "${RC_BKP_DB}" -eq 0 ]; then'
+                - "LogTrackingFileDB=$(tail -1 ${TrackingFileDB2})"
+                - 'if grep -q "DUMP is complete" "$TrackingFileDB"; then'
+                - 'echo "Full Data backup of SAP DB completed successfully"'
+                - 'echo "$(date +"%Y-%m-%d-%H:%M:%S") Full Data Backup of SAP DB completed successfully. Check in the next line if the upload to S3 is successful" >>  $LOGFILE_DATA'
+                - "sleep 5"
+                - "s3_data_upload ${SID} ${S3Bucket}"
+                - "RC_SYNC_DB=$?"
+                - 'if  [ "${RC_SYNC_DB}" != 0 ]; then'
+                - 'echo "$(date +"%Y-%m-%d-%H:%M:%S") Execution of sync to S3 script for SAP DB failed. Please check." >>  $LOGFILE_DATA'
+                - "fi"
+                - "else"
+                - 'echo "Full Data Backup for SAP DB failed. Please check."'
+                - 'echo "$(date +"%Y-%m-%d-%H:%M:%S") Data Backup for SAP DB failed. The data backup started but did not complete. Please check." >>  $LOGFILE_DATA'
+                - 'echo "$(date +"%Y-%m-%d-%H:%M:%S") error message: $LogTrackingFileDB" >>  $LOGFILE_DATA'
+                - "rm ${TrackingFileDB} ${TrackingFileDB2}"
+                - "fi"
+                - "else"
+                - 'echo "Full Data Backup for SAP DB failed. Please check."'
+                - 'echo "$(date +"%Y-%m-%d-%H:%M:%S") Data Backup for SAP DB failed. The data backup command could not be executed. Please check." >>  $LOGFILE_DATA'
+                - "fi"
+                - "rm ${TrackingFileDB} ${TrackingFileDB2}"
+                - "}"
+                - "#Function for Cumulative Backup of SAP DB"
+                - "cum_backup() {"
+                - 'echo "Starting the cumulative data backup of ${SID} database"'
+                - 'echo "$(date +"%Y-%m-%d-%H:%M:%S") Starting the cumulative data backup of ${SID} database" >>  $LOGFILE_DATA'
+                - 'su - ${SID,,}adm -c "isql -k${USERKEY} -X << EOF'
+                - 'dump database ${SID} cumulative using config = "${SID}DB"'
+                - 'go > "${TrackingFileDB2}"'
+                - 'EOF"'
+                - "RC_BKP_DB=$?"
+                - "tail -1 ${TrackingFileDB2} > ${TrackingFileDB}"
+                - 'if [ "${RC_BKP_DB}" -eq 0 ]; then'
+                - 'if grep -q "DUMP is complete" "$TrackingFileDB"; then'
+                - 'echo "cumulative Data backup of SAP DB completed successfully"'
+                - 'echo "$(date +"%Y-%m-%d-%H:%M:%S") cumulative Data Backup of SAP DB completed successfully. Check in the next line if the upload to S3 is successful" >>  $LOGFILE_DATA'
+                - "rm ${TrackingFileDB} ${TrackingFileDB2}"
+                - "sleep 5"
+                - "s3_data_upload ${SID} ${S3Bucket}"
+                - "RC_SYNC_DB=$?"
+                - 'if  [ "${RC_SYNC_DB}" != 0 ]; then'
+                - 'echo "$(date +"%Y-%m-%d-%H:%M:%S") Execution of sync to S3 script for SAP DB failed. Please check." >>  $LOGFILE_DATA'
+                - "fi"
+                - "else"
+                - 'echo "cumulative Data Backup for SAP DB failed. Please check."'
+                - 'echo "$(date +"%Y-%m-%d-%H:%M:%S") cumulative data Backup for SAP DB failed. The data backup started but did not complete. Please check." >>  $LOGFILE_DATA'
+                - "rm ${TrackingFileDB} ${TrackingFileDB2}"
+                - "fi"
+                - "else"
+                - 'echo "cumulative Data Backup for SAP DB failed. Please check."'
+                - 'echo "$(date +"%Y-%m-%d-%H:%M:%S") cumulative Data Backup for SAP DB failed. The data backup command could not be executed. Please check." >>  $LOGFILE_DATA'
+                - "rm ${TrackingFileDB} ${TrackingFileDB2}"
+                - "fi"
+                - "}"
+                - "#Function for Upload of Data Backup to S3"
+                - "s3_data_upload(){"
+                - "StatusFile=/tmp/.awss3syncdata.0"
+                - "LockFile=/tmp/.awss3syncdata.lock"
+                - 'dt="$(date +"%Y-%m-%d-%H:%M:%S")"'
+                - "umask 002"
+                - 'trap "rm -f ${LockFile}; exit" SIGHUP SIGINT SIGTERM'
+                - "cleanup(){"
+                - "local _exitcode=$1"
+                - "rm -f ${LockFile} > /dev/null 2>&1"
+                - "}"
+                - "rmlocalbkup(){"
+                - "rm -f ${BackupDir}/*"
+                - 'echo "Local backup files deleted"'
+                - 'echo "$(date +"%Y-%m-%d-%H:%M:%S") Local data backup files deleted" >>  $LOGFILE_DATA'
+                - "}"
+                - "if [ -f ${LockFile} ]; then"
+                - 'echo "Lock file found. Sync may be active. Exit."'
+                - 'echo "$(date +"%Y-%m-%d-%H:%M:%S") Data Backup sync to S3 failed because another sync is in progress. Exiting... Please check." >>  $LOGFILE_DATA'
+                - "exit 1"
+                - "else"
+                - "touch ${LockFile}"
+                - "fi"
+                - "if [ ! -d ${BackupDir} ]; then"
+                - 'echo "${BackupDir} not available"'
+                - 'echo "$(date +"%Y-%m-%d-%H:%M:%S") Data Backup sync to S3 failed because the backup directory ${BackupDir} is not available. Exiting... Please check." >>  $LOGFILE_DATA'
+                - "cleanup 1"
+                - "fi"
+                - 'echo -n "$(date +%m%d%y%H%M%S)-" > ${StatusFile}'
+                - "aws s3 sync ${BackupDir} s3://${S3Bucket}/ASEBACKUP/${SID}/${TODAY}/DATA --quiet"
+                - "SyncStatus=$?"
+                - "if [ $SyncStatus -eq 0 ]; then"
+                - 'echo "Sync completed without errors or warnings"'
+                - "echo -n $(date +%m%d%y%H%M%S) >> ${StatusFile}"
+                - 'echo "$(date +"%Y-%m-%d-%H:%M:%S") Data Backup sync to S3 successfully completed." >>  $LOGFILE_DATA'
+                - "rm -f ${StatusFile} 2>&1 > /dev/null"
+                - "rmlocalbkup"
+                - "cleanup 0"
+                - "else"
+                - 'echo "Problems during sync"'
+                - 'echo "$(date +"%Y-%m-%d-%H:%M:%S") Data Backup sync to S3 failed. Please check." >>  $LOGFILE_DATA'
+                - "rm -f ${StatusFile} 2>&1 > /dev/null"
+                - "cleanup 1"
+                - "fi"
+                - "}"
+                - "#Function for Log Cumulative Backup of SAP DB"
+                - "log_backup(){"
+                - 'su - ${SID,,}adm -c "isql -k${USERKEY} -X << EOF'
+                - 'dump transaction ${SID} using config = "${SID}DBLOG"'
+                - 'go > "${TrackingLogFile2}"'
+                - 'EOF"'
+                - "RC_BKP=$?"
+                - "tail -1 ${TrackingLogFile2} > ${TrackingLogFile}"
+                - 'if [ "${RC_BKP}" -eq 0 ]; then'
+                - 'if grep -q "DUMP is complete" "$TrackingLogFile2"; then'
+                - 'echo "$(date +"%Y-%m-%d-%H:%M:%S") Log Backup completed successfully. Check in the next line if the upload to S3 was successful" >>  $LOGFILE_LOG'
+                - "rm ${TrackingLogFile} ${TrackingLogFile2}"
+                - "sleep 5"
+                - "s3_log_upload ${SID} ${S3Bucket}"
+                - "RC_SYNC=$?"
+                - 'if  [ "${RC_SYNC}" != 0 ]; then'
+                - 'echo "Failed to call Sync to S3 method"'
+                - 'echo "$(date +"%Y-%m-%d-%H:%M:%S") Execution of sync to S3 script failed. Please check." >>  $LOGFILE_LOG'
+                - "fi"
+                - "else"
+                - 'echo "Log Backup failed. Please check."'
+                - 'echo "$(date +"%Y-%m-%d-%H:%M:%S") Log Backup Failed. The log backup started but did not complete. Please check." >>  $LOGFILE_LOG'
+                - "rm ${TrackingLogFile} ${TrackingLogFile2}"
+                - "fi"
+                - "else"
+                - 'echo "Log Backup failed. Please check."'
+                - 'echo "$(date +"%Y-%m-%d-%H:%M:%S") Log Backup Failed. The log backup command could not be executed. Please check." >>  $LOGFILE_LOG'
+                - "rm ${TrackingLogFile} ${TrackingLogFile2}"
+                - "fi"
+                - "}"
+                - "#Function for Upload of Log Backup to S3"
+                - "s3_log_upload(){"
+                - "StatusFile=/tmp/.awss3synclog.0"
+                - "LockFile=/tmp/.awss3synclog.lock"
+                - 'dt="$(date +"%Y-%m-%d-%H:%M:%S")"'
+                - "umask 002"
+                - 'trap "rm -f ${LockFile}; exit" SIGHUP SIGINT SIGTERM'
+                - "cleanup(){"
+                - "local _exitcode=$1"
+                - "rm -f ${LockFile} > /dev/null 2>&1"
+                - "}"
+                - "rmlocalbkup(){"
+                - "rm -f ${BackupLogDir}/*"
+                - 'echo "Local backup files deleted"'
+                - 'echo "$(date +"%Y-%m-%d-%H:%M:%S") Local log backup files deleted" >>  $LOGFILE_LOG'
+                - "}"
+                - "if [ -f ${LockFile} ]; then"
+                - 'echo "Lock file found. Sync may be active. Exit."'
+                - 'echo "$(date +"%Y-%m-%d-%H:%M:%S") Log Backup sync to S3 failed because another sync is in progress. Exiting... Please check." >>  $LOGFILE_LOG'
+                - "exit 1"
+                - "else"
+                - "touch ${LockFile}"
+                - "fi"
+                - "if [ ! -d ${BackupLogDir} ]; then"
+                - 'echo "${BackupLogDir} not available"'
+                - 'echo "$(date +"%Y-%m-%d-%H:%M:%S") Log Backup sync to S3 failed because the backup directory ${BackupLogDir} is not available. Exiting... Please check." >>  $LOGFILE_LOG'
+                - "cleanup 1"
+                - "fi"
+                - 'echo -n "$(date +%m%d%y%H%M%S)-" > ${StatusFile}'
+                - "aws s3 sync ${BackupLogDir} s3://${S3Bucket}/ASEBACKUP/${SID}/${TODAY}/LOG --quiet"
+                - "SyncStatus=$?"
+                - "if [ $SyncStatus -eq 0 ]; then"
+                - 'echo "Sync to S3 completed without errors or warnings"'
+                - "echo -n $(date +%m%d%y%H%M%S) >> ${StatusFile}"
+                - 'echo "$(date +"%Y-%m-%d-%H:%M:%S") Log Backup sync to S3 successfully completed." >>  $LOGFILE_LOG'
+                - "rmlocalbkup"
+                - "cleanup 0"
+                - "else"
+                - 'echo "Problems during sync"'
+                - 'echo "$(date +"%Y-%m-%d-%H:%M:%S") Log Backup sync to S3 failed. Please check." >>  $LOGFILE_LOG'
+                - "rm -f ${StatusFile} 2>&1 > /dev/null"
+                - "cleanup 1"
+                - "fi"
+                - "}"
+                - "others_backup() {"
+                - "#Backup of MASTER DB"
+                - 'echo "Starting the full data backup of MASTER database"'
+                - 'echo "$(date +"%Y-%m-%d-%H:%M:%S") Starting the full data backup of MASTER database" >>  $LOGFILE_DATA'
+                - 'su - ${SID,,}adm -c "isql -k${USERKEY} -X << EOF'
+                - 'dump database master using config = "${SID}DB"'
+                - 'go > "${TrackingFilemaster2}"'
+                - 'EOF"'
+                - "RC_BKP_MASTER=$?"
+                - "tail -1 ${TrackingFilemaster2} > ${TrackingFilemaster}"
+                - 'if [ "${RC_BKP_MASTER}" -eq 0 ]; then'
+                - 'if grep -q "DUMP is complete" "$TrackingFilemaster"; then'
+                - 'echo "Full Data backup for MASTER completed successfully"'
+                - 'echo "$(date +"%Y-%m-%d-%H:%M:%S") Full Data Backup for MASTER completed successfully. Check in the next line if the upload to S3 is successful" >>  $LOGFILE_DATA'
+                - "rm ${TrackingFilemaster} ${TrackingFilemaster2}"
+                - "sleep 5"
+                - "s3_data_upload ${SID} ${S3Bucket}"
+                - "RC_SYNC_MASTER=$?"
+                - 'if  [ "${RC_SYNC_MASTER}" != 0 ]; then'
+                - 'echo "$(date +"%Y-%m-%d-%H:%M:%S") Execution of sync to S3 script for MASTER failed. Please check." >>  $LOGFILE_DATA'
+                - "fi"
+                - "else"
+                - 'echo "Full Data Backup failed for MASTER. Please check."'
+                - 'echo "$(date +"%Y-%m-%d-%H:%M:%S") Full Data Backup for MASTER failed. The data backup started but did not complete. Please check." >>  $LOGFILE_DATA'
+                - "rm ${TrackingFilemaster} ${TrackingFilemaster2}"
+                - "fi"
+                - "else"
+                - 'echo "Full Data Backup for MASTER failed. Please check."'
+                - 'echo "$(date +"%Y-%m-%d-%H:%M:%S") Data Backup for MASTER failed. The data backup command could not be executed. Please check." >>  $LOGFILE_DATA'
+                - "rm ${TrackingFilemaster} ${TrackingFilemaster2}"
+                - "fi"
+                - "#Backup of SAPTOOLS DB"
+                - 'echo "Starting the full data backup of SAPTOOLS database"'
+                - 'echo "$(date +"%Y-%m-%d-%H:%M:%S") Starting the full data backup of SAPTOOLS database" >>  $LOGFILE_DATA'
+                - 'su - ${SID,,}adm -c "isql -k${USERKEY} -X << EOF'
+                - 'dump database saptools using config = "${SID}DB"'
+                - 'go > "${TrackingFilesaptools2}"'
+                - 'EOF"'
+                - "RC_BKP_SAPTOOLS=$?"
+                - "tail -1 ${TrackingFilesaptools2} > ${TrackingFilesaptools}"
+                - 'if [ "${RC_BKP_SAPTOOLS}" -eq 0 ]; then'
+                - 'if grep -q "DUMP is complete" "$TrackingFilesaptools"; then'
+                - 'echo "Full Data backup for SAPTOOLS completed successfully"'
+                - 'echo "$(date +"%Y-%m-%d-%H:%M:%S") Full Data Backup for SAPTOOLS completed successfully. Check in the next line if the upload to S3 is successful" >>  $LOGFILE_DATA'
+                - "rm ${TrackingFilesaptools} ${TrackingFilesaptools2}"
+                - "sleep 5"
+                - "s3_data_upload ${SID} ${S3Bucket}"
+                - "RC_SYNC_SAPTOOLS=$?"
+                - 'if  [ "${RC_SYNC_SAPTOOLS}" != 0 ]; then'
+                - 'echo "$(date +"%Y-%m-%d-%H:%M:%S") Execution of sync to S3 script for SAPTOOLS failed. Please check." >>  $LOGFILE_DATA'
+                - "fi"
+                - "else"
+                - 'echo "Full Data Backup failed for SAPTOOLS. Please check."'
+                - 'echo "$(date +"%Y-%m-%d-%H:%M:%S") Full Data Backup for SAPTOOLS failed. The data backup started but did not complete. Please check." >>  $LOGFILE_DATA'
+                - "rm ${TrackingFilesaptools} ${TrackingFilesaptools2}"
+                - "fi"
+                - "else"
+                - 'echo "Full Data Backup for SAPTOOLS failed. Please check."'
+                - 'echo "$(date +"%Y-%m-%d-%H:%M:%S") Full Data Backup for SAPTOOLS failed. The data backup command could not be executed. Please check." >>  $LOGFILE_DATA'
+                - "rm ${TrackingFilesaptools} ${TrackingFilesaptools2}"
+                - "fi"
+                - "#Backup of SYBSYSTEMPROCS DB"
+                - 'echo "Starting the full data backup of SYBSYSTEMPROCS database"'
+                - 'echo "$(date +"%Y-%m-%d-%H:%M:%S") Starting the full data backup of SYBSYSTEMPROCS database" >>  $LOGFILE_DATA'
+                - 'su - ${SID,,}adm -c "isql -k${USERKEY} -X << EOF'
+                - 'dump database sybsystemprocs using config = "${SID}DB"'
+                - 'go > "${TrackingFilesybsystemprocs2}"'
+                - 'EOF"'
+                - "RC_BKP_SYBSYSTEMPROCS=$?"
+                - "tail -1 ${TrackingFilesybsystemprocs2} > ${TrackingFilesybsystemprocs}"
+                - 'if [ "${RC_BKP_SYBSYSTEMPROCS}" -eq 0 ]; then'
+                - 'if grep -q "DUMP is complete" "$TrackingFilesybsystemprocs"; then'
+                - 'echo "Full Data backup for SYBSYSTEMPROCS completed successfully"'
+                - 'echo "$(date +"%Y-%m-%d-%H:%M:%S") Full Data Backup for SYBSYSTEMPROCS completed successfully. Check in the next line if the upload to S3 is successful" >>  $LOGFILE_DATA'
+                - "rm ${TrackingFilesybsystemprocs} ${TrackingFilesybsystemprocs2}"
+                - "sleep 5"
+                - "s3_data_upload ${SID} ${S3Bucket}"
+                - "RC_SYNC_SYBSYSTEMPROCS=$?"
+                - 'if  [ "${RC_SYNC_SYBSYSTEMPROCS}" != 0 ]; then'
+                - 'echo "$(date +"%Y-%m-%d-%H:%M:%S") Execution of sync to S3 script for SYBSYSTEMPROCS failed. Please check." >>  $LOGFILE_DATA'
+                - "fi"
+                - "else"
+                - 'echo "Full Data Backup failed for SYBSYSTEMPROCS. Please check."'
+                - 'echo "$(date +"%Y-%m-%d-%H:%M:%S") Full Data Backup for SYBSYSTEMPROCS failed. The data backup started but did not complete. Please check." >>  $LOGFILE_DATA'
+                - "rm ${TrackingFilesybsystemprocs} ${TrackingFilesybsystemprocs2}"
+                - "fi"
+                - "else"
+                - 'echo "Full Data Backup for SYBSYSTEMPROCS failed. Please check."'
+                - 'echo "$(date +"%Y-%m-%d-%H:%M:%S") Full Data Backup for SYBSYSTEMPROCS failed. The data backup command could not be executed. Please check." >>  $LOGFILE_DATA'
+                - "rm ${TrackingFilesybsystemprocs} ${TrackingFilesybsystemprocs2}"
+                - "fi"
+                - "#Backup of SYBMGMTDB DB"
+                - 'echo "Starting the full data backup of SYBMGMTDB database"'
+                - 'echo "$(date +"%Y-%m-%d-%H:%M:%S") Starting the full data backup of SYBMGMTDB database" >>  $LOGFILE_DATA'
+                - 'su - ${SID,,}adm -c "isql -k${USERKEY} -X << EOF'
+                - 'dump database sybmgmtdb using config = "${SID}DB"'
+                - 'go > "${TrackingFilesybmgmtdb2}"'
+                - 'EOF"'
+                - "RC_BKP_SYBMGMTDB=$?"
+                - "tail -1 ${TrackingFilesybmgmtdb2} > ${TrackingFilesybmgmtdb}"
+                - 'if [ "${RC_BKP_SYBMGMTDB}" -eq 0 ]; then'
+                - 'if grep -q "DUMP is complete" "$TrackingFilesybmgmtdb"; then'
+                - 'echo "Data backup for SYBMGMTDB completed successfully"'
+                - 'echo "$(date +"%Y-%m-%d-%H:%M:%S") Data Backup for SYBMGMTDB completed successfully. Check in the next line if the upload to S3 is successful" >>  $LOGFILE_DATA'
+                - "rm ${TrackingFilesybmgmtdb} ${TrackingFilesybmgmtdb2}"
+                - "sleep 5"
+                - "s3_data_upload ${SID} ${S3Bucket}"
+                - "RC_SYNC_SYBMGMTDB=$?"
+                - 'if  [ "${RC_SYNC_SYBMGMTDB}" != 0 ]; then'
+                - 'echo "$(date +"%Y-%m-%d-%H:%M:%S") Execution of sync to S3 script for SYBMGMTDB failed. Please check." >>  $LOGFILE_DATA'
+                - "fi"
+                - "else"
+                - 'echo "Full Data Backup failed for SYBMGMTDB. Please check."'
+                - 'echo "$(date +"%Y-%m-%d-%H:%M:%S") Full Data Backup for SYBMGMTDB failed. The data backup started but did not complete. Please check." >>  $LOGFILE_DATA'
+                - "rm ${TrackingFilesybmgmtdb} ${TrackingFilesybmgmtdb2}"
+                - "fi"
+                - "else"
+                - 'echo "Full Data Backup for SYBMGMTDB failed. Please check."'
+                - 'echo "$(date +"%Y-%m-%d-%H:%M:%S") Full Data Backup for SYBMGMTDB failed. The data backup command could not be executed. Please check." >>  $LOGFILE_DATA'
+                - "rm ${TrackingFilesybmgmtdb} ${TrackingFilesybmgmtdb2}"
+                - "fi"
+                - "}"
+                - "#main()"
+                - "if [ $TYPE == FULL ]; then"
+                - "  full_backup"
+                - "  others_backup"
+                - "fi"
+                - "if [ $TYPE == CUM ]; then"
+                - "  cum_backup"
+                - "  others_backup"
+                - "fi"
+                - "if [ $TYPE == LOG ]; then"
+                - "  log_backup"
+                - "fi"
+                - "### AT THE END, SEND SNS Message ###"
+                - "touch /tmp/bkp_mail_message.txt"
+                - 'echo "SAP ASE Backup for ${SID}" >> /tmp/bkp_mail_message.txt'
+                - 'echo " " >> /tmp/bkp_mail_message.txt'
+                - "if [ $TYPE == LOG ]; then"
+                - "cat $LOGFILE_LOG | tail -10 >> /tmp/bkp_mail_message.txt"
+                - "fi"
+                - "cat $LOGFILE_DATA | tail -10 >> /tmp/bkp_mail_message.txt"
+                - 'aws sns publish --topic-arn $SNSTopicArn --message "$(cat /tmp/bkp_mail_message.txt)"'
+                - "rm -f /tmp/bkp_mail_message.txt"
+
+  SSMDocumentRole:
+    Type: "AWS::IAM::Role"
+    Properties:
+      RoleName: "SSM-Execution-Role-SAP-ASE-Backup"
+      Description: "Role to allow Event Bridge to call SSM Document for ASE Backup"
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - events.amazonaws.com
+            Action:
+              - "sts:AssumeRole"
+      Path: /service-role/
+      Policies:
+        - PolicyName: SendCommandPermissions
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Action:
+                  - "ssm:SendCommand"
+                Resource:
+                  - !Sub arn:${AWS::Partition}:ssm:${AWS::Region}:${AWS::AccountId}:document/${SAPASEBACKUP}
+                  - !Sub arn:${AWS::Partition}:ec2:${AWS::Region}:${AWS::AccountId}:instance/*
+                Effect: Allow
+Outputs:
+  SSMDocumentRole:
+    Description: "Name for EC2 role for SAP systems"
+    Value: !Ref SSMDocumentRole
+  SAPASEBACKUP:
+    Description: "SSM Document Name"
+    Value: !Ref SAPASEBACKUP

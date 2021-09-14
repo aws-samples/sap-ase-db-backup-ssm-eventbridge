@@ -1,0 +1,59 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: Cloudformation template to setup a CloudWatch EventBrigde Rule to schedule SAP ASE Backups
+Parameters:
+  SNSTopicArn:
+    Type: String
+    Description: "SNS Topic to publish SAP ASE Backup messages"
+  SSMDocumentName:
+    Type: String
+    Description: Specify the SSM Document ARN created for SAP ASE Backup
+  SidPar:
+    Type: String
+    Description: Specify the SID for the SAP ASE where backup needs to be scheduled
+  BackupTypePar:
+    Type: String
+    Description: Specify the Backup type for the backup will be scheduled
+    AllowedValues:
+      - FULL
+      - CUM
+      - LOG
+  RoleArnPar:
+    Type: String
+    Description: Specify the role for the RunCommand execution
+  InstanceIdPar:
+    Type: String
+    Description: Specify the Instance Hostname Tag value of the ASE EC2
+  S3bucketPar:
+    Type: String
+    Description: Specify the S3 Bucket of the ASE backup
+  BackupdirPar:
+    Type: String
+    Description: Specify the Data Backup Directory
+  BackupLogdirPar:
+    Type: String
+    Description: Specify the Log Backup Directory
+  SchedulingTime:
+    Type: String
+    Description: Provide the schedule time frame to run the automation. Double chek https://docs.aws.amazon.com/eventbridge/latest/userguide/eb-create-rule-schedule.html for cron expressions. Ex. cron(0 12 * * ? *) or rate(10 minutes)
+Resources:
+  CloudWatchEventsRule:
+    Type: AWS::Events::Rule
+    Properties:
+      Name: !Join ["_", [SAPASEBACKUP, !Ref SidPar, !Ref BackupTypePar]]
+      Description: CloudWatch rule to periodically take backups
+      ScheduleExpression: !Ref SchedulingTime
+      State: "DISABLED"
+      Targets:
+        - Arn: !Sub arn:${AWS::Partition}:ssm:${AWS::Region}:${AWS::AccountId}:document/${SSMDocumentName}
+          Id: !Join ["-", ["SAP_ASE_BACKUP_", !Ref SidPar, !Ref BackupTypePar]]
+          Input: !Sub '{"backupdir":["${BackupdirPar}"],"snstopicarn":["${SNSTopicArn}"],"s3bucket":["${S3bucketPar}"],"backuptype":["${BackupTypePar}"],"backuplogdir":["${BackupLogdirPar}"],"sid":["${SidPar}"]}'
+          RoleArn: !Ref RoleArnPar
+          RunCommandParameters:
+            RunCommandTargets:
+              - Key: "InstanceIds"
+                Values:
+                  - !Ref InstanceIdPar
+Outputs:
+  CloudWatchEventsRule:
+    Description: "Scheduled EventRule Name"
+    Value: !Ref CloudWatchEventsRule

@@ -1,0 +1,59 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: Cloudformation template to setup a SNS Topic and Policy for SAP ASE Backups
+
+Parameters:
+  SNSTopicEmail:
+    Description: "Email to subscribe to ASE Backup E-mails"
+    Type: String
+
+Resources:
+  EventTopicPolicy:
+    Type: AWS::SNS::TopicPolicy
+    Properties:
+      PolicyDocument:
+        Version: "2012-10-17"
+        Id: default_policy
+        Statement:
+          - Sid: default_statement
+            Effect: Allow
+            Principal:
+              AWS: "*"
+            Action:
+              - sns:GetTopicAttributes
+              - sns:SetTopicAttributes
+              - sns:AddPermission
+              - sns:RemovePermission
+              - sns:DeleteTopic
+              - sns:Subscribe
+              - sns:ListSubscriptionsByTopic
+              - sns:Publish
+              - sns:Receive
+            Resource: "*"
+            Condition:
+              StringEquals:
+                AWS:SourceOwner: !Ref AWS::AccountId
+          - Sid: AWSEvents
+            Effect: Allow
+            Principal:
+              Service: events.amazonaws.com
+            Action: sns:Publish
+            Resource: "*"
+      Topics:
+        - Ref: SAPASESNSTopic
+
+  SAPASESNSTopic:
+    Type: AWS::SNS::Topic
+    Properties:
+      DisplayName: "SAP ASE Backup Topic"
+      TopicName: "SAP-ASE-Backup-Topic"
+      Subscription:
+        - Endpoint: !Ref SNSTopicEmail
+          Protocol: email
+
+Outputs:
+  SAPASESNSTopic:
+    Description: "SNS Topic for SAP ASE Backups"
+    Value: !Ref SAPASESNSTopic
+  EventTopicPolicy:
+    Description: "SSM EventTopicPolicy"
+    Value: !Ref EventTopicPolicy
